@@ -30,7 +30,7 @@
   python3 kanban_update.py progress JJC-20260223-012 "正在分析需求，拟定3个子方案" "1.调研技术选型|2.撰写设计文档|3.实现原型"
 """
 import datetime
-import json, pathlib, sys, subprocess, logging, os, re
+import json, pathlib, sys, subprocess, logging, os, re, shlex
 
 _BASE = pathlib.Path(__file__).resolve().parent.parent
 TASKS_FILE = _BASE / 'data' / 'tasks_source.json'
@@ -86,6 +86,73 @@ def _trigger_refresh():
 
 def find_task(tasks, task_id):
     return next((t for t in tasks if t.get('id') == task_id), None)
+
+
+def _build_dispatch_message(agent_id, task):
+    task_id = task.get('id', '')
+    title = task.get('title', '(无标题)')
+    target_dept = task.get('targetDept', '')
+    msgs = {
+        'taizi': (
+            f'📜 皇上旨意需要你处理\n'
+            f'任务ID: {task_id}\n'
+            f'旨意: {title}\n'
+            f'⚠️ 看板已有此任务，请勿重复创建。直接用 kanban_update.py 更新状态。\n'
+            f'请立即转交中书省起草执行方案。'
+        ),
+        'zhongshu': (
+            f'📜 旨意已到中书省，请起草方案\n'
+            f'任务ID: {task_id}\n'
+            f'旨意: {title}\n'
+            f'⚠️ 看板已有此任务记录，请勿重复创建。直接用 kanban_update.py state 更新状态。\n'
+            f'请立即起草执行方案，走完完整三省流程（中书起草→门下审议→尚书派发→六部执行）。'
+        ),
+        'menxia': (
+            f'📋 中书省方案提交审议\n'
+            f'任务ID: {task_id}\n'
+            f'旨意: {title}\n'
+            f'⚠️ 看板已有此任务，请勿重复创建。\n'
+            f'请审议中书省方案，给出准奏或封驳意见。'
+        ),
+        'shangshu': (
+            f'📮 门下省已准奏，请派发执行\n'
+            f'任务ID: {task_id}\n'
+            f'旨意: {title}\n'
+            f'{"建议派发部门: " + target_dept if target_dept else ""}\n'
+            f'⚠️ 看板已有此任务，请勿重复创建。\n'
+            f'请分析方案并派发给六部执行。'
+        ),
+    }
+    return msgs.get(agent_id, (
+        f'📌 请处理任务\n'
+        f'任务ID: {task_id}\n'
+        f'旨意: {title}\n'
+        f'⚠️ 看板已有此任务，请勿重复创建。直接用 kanban_update.py 更新状态。'
+    ))
+
+
+def _dispatch_for_task_state(task, trigger='kanban-update'):
+    state = task.get('state', '')
+    org = task.get('org', '')
+    agent_id = _STATE_AGENT_MAP.get(state)
+    if agent_id is None and state in ('Doing', 'Next'):
+        agent_id = _ORG_AGENT_MAP.get(org)
+    if not agent_id:
+        log.info(f'ℹ️ {task.get("id", "")} 状态 {state} 无对应 Agent，跳过自动派发')
+        return False
+    msg = _build_dispatch_message(agent_id, task)
+    cmd = ['openclaw', 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=310)
+        if result.returncode == 0:
+            log.info(f'✅ 自动派发成功: {task.get("id", "")} → {agent_id} ({trigger})')
+            return True
+        err = (result.stderr or result.stdout or '').strip()
+        log.warning(f'⚠️ 自动派发失败: {task.get("id", "")} → {agent_id} ({trigger}) | {err[:300]}')
+        return False
+    except Exception as e:
+        log.warning(f'⚠️ 自动派发异常: {task.get("id", "")} → {agent_id} ({trigger}) | {e}')
+        return False
 
 
 # 旨意标题最低要求
@@ -234,6 +301,7 @@ def cmd_state(task_id, new_state, now_text=None):
     """更新任务状态（原子操作，含流转合法性校验）"""
     old_state = [None]
     rejected = [False]
+    updated_task = [None]
     def modifier(tasks):
         t = find_task(tasks, task_id)
         if not t:
@@ -251,6 +319,7 @@ def cmd_state(task_id, new_state, now_text=None):
         if now_text:
             t['now'] = now_text
         t['updatedAt'] = now_iso()
+        updated_task[0] = dict(t)
         return tasks
     atomic_json_update(TASKS_FILE, modifier, [])
     _trigger_refresh()
@@ -258,6 +327,8 @@ def cmd_state(task_id, new_state, now_text=None):
         log.info(f'❌ {task_id} 状态转换被拒: {old_state[0]} → {new_state}')
     else:
         log.info(f'✅ {task_id} 状态更新: {old_state[0]} → {new_state}')
+        if new_state not in ('Done', 'Cancelled', 'Blocked') and updated_task[0] is not None:
+            _dispatch_for_task_state(updated_task[0], trigger=f'state:{old_state[0]}->{new_state}')
 
 
 def cmd_flow(task_id, from_dept, to_dept, remark):
