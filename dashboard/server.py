@@ -2124,7 +2124,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urlparse(self.path).path.rstrip('/')
         if p in ('', '/dashboard', '/dashboard.html'):
-            self.send_file(DIST / 'index.html')
+            # Prefer the legacy single-file dashboard for robustness.
+            # The React dist build can white-screen if the browser holds stale
+            # assets during rapid rebuild/redeploy cycles, while dashboard.html
+            # is self-contained and stable.
+            self.send_file(BASE / 'dashboard.html')
         elif p == '/healthz':
             checks = {'dataDir': DATA.is_dir(), 'tasksReadable': (DATA / 'tasks_source.json').exists()}
             checks['dataWritable'] = os.access(str(DATA), os.W_OK)
