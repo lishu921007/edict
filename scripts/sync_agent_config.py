@@ -10,7 +10,7 @@ log = logging.getLogger('sync_agent_config')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s', datefmt='%H:%M:%S')
 
 # Auto-detect project root (parent of scripts/)
-BASE = pathlib.Path(__file__).parent.parent
+BASE = pathlib.Path(__file__).resolve().parent.parent
 DATA = BASE / 'data'
 OPENCLAW_CFG = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
 
@@ -222,6 +222,15 @@ def _sync_script_symlink(src_file: pathlib.Path, dst_file: pathlib.Path) -> bool
     Returns True if the link was (re-)created, False if already up-to-date.
     """
     src_resolved = src_file.resolve()
+    dst_parent_resolved = dst_file.parent.resolve()
+    dst_resolved = dst_parent_resolved / dst_file.name
+
+    # Never create self-referential links. This can happen when the script is
+    # executed via a symlinked workspace copy and BASE accidentally points at
+    # ~/.openclaw/workspace-main instead of the real checkout.
+    if dst_resolved == src_resolved:
+        return False
+
     # Already a correct symlink?
     if dst_file.is_symlink() and dst_file.resolve() == src_resolved:
         return False
